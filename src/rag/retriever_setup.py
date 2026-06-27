@@ -1,123 +1,164 @@
 """
-Retriever setup and vector store configuration.
-"""
+Retriever setup backed by a persistent, per-user Qdrant vector store.
 
-import os
+All users' document chunks live in a single Qdrant collection. Each chunk's
+payload carries a ``user_id`` and ``doc_id`` under its ``metadata``; retrieval is
+always filtered by ``user_id`` so a user only ever sees their own documents.
+"""
 
 from langchain_core.documents import Document
 from langchain_core.tools import create_retriever_tool
 from langchain_openai import OpenAIEmbeddings
-# from langchain_qdrant import QdrantVectorStore
-from langchain_community.vectorstores import FAISS
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
 
 from src.core.config import settings
 
 embeddings = OpenAIEmbeddings()
 
-# Global variable to store the FAISS vectorstore instance
-# This ensures get_retriever() can access documents stored by retriever_chain()
-_faiss_vectorstore = None
+COLLECTION = settings.USER_DOCS_COLLECTION
+
+# Lazily initialized singletons (cheap, no network until first use).
+_client = None
+_vectorstore = None
 
 
-def retriever_chain(chunks: list[Document]):
+def _get_client() -> QdrantClient:
+    """Return a shared QdrantClient, creating it on first use."""
+    global _client
+    if _client is None:
+        _client = QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY,
+        )
+    return _client
+
+
+def _ensure_collection() -> None:
+    """Create the collection and payload indexes if they don't exist yet."""
+    client = _get_client()
+    if not client.collection_exists(COLLECTION):
+        # Derive the vector size from the embedding model so it always matches.
+        dim = len(embeddings.embed_query("dimension probe"))
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=qmodels.VectorParams(
+                size=dim, distance=qmodels.Distance.COSINE
+            ),
+        )
+        # Indexes make the user_id / doc_id filters fast and reliable.
+        for field in ("metadata.user_id", "metadata.doc_id"):
+            client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name=field,
+                field_schema=qmodels.PayloadSchemaType.KEYWORD,
+            )
+
+
+def _get_vectorstore() -> QdrantVectorStore:
+    """Return a shared QdrantVectorStore over the user-documents collection."""
+    global _vectorstore
+    _ensure_collection()
+    if _vectorstore is None:
+        _vectorstore = QdrantVectorStore(
+            client=_get_client(),
+            collection_name=COLLECTION,
+            embedding=embeddings,
+        )
+    return _vectorstore
+
+
+def _user_filter(user_id: str) -> qmodels.Filter:
+    """Build a Qdrant filter matching a single user's chunks."""
+    return qmodels.Filter(
+        must=[
+            qmodels.FieldCondition(
+                key="metadata.user_id",
+                match=qmodels.MatchValue(value=user_id),
+            )
+        ]
+    )
+
+
+def retriever_chain(chunks: list[Document], user_id: str, doc_id: str) -> bool:
     """
-    Initialize and store documents in FAISS vector database.
+    Store document chunks in Qdrant, tagged with the owning user and document.
 
     Args:
-        chunks: List of document chunks to store.
+        chunks: The document chunks to embed and store.
+        user_id: The owner of the document.
+        doc_id: A unique identifier for this uploaded document.
 
     Returns:
-        Boolean indicating success of the operation.
+        True if the chunks were stored successfully, False otherwise.
     """
-    global _faiss_vectorstore
-
     try:
-        # Commenting out Qdrant code for temporary FAISS usage
-        # vectorstore = QdrantVectorStore.from_documents(
-        #     documents=chunks,
-        #     embedding=embeddings,
-        #     url=settings.QDRANT_URL,
-        #     api_key=settings.QDRANT_API_KEY,
-        #     collection_name=settings.CODE_COLLECTION,
-        # )
-        vectorstore = FAISS.from_documents(
-            documents=chunks,
-            embedding=embeddings
-        )
-
-        # Store the vectorstore globally so get_retriever() can access it
-        _faiss_vectorstore = vectorstore
-
-        print("FAISS vector store initialized with documents")
-        print(f"Vectorstore contains {len(chunks)} document chunks")
+        vectorstore = _get_vectorstore()
+        for chunk in chunks:
+            chunk.metadata = {
+                **(chunk.metadata or {}),
+                "user_id": user_id,
+                "doc_id": doc_id,
+            }
+        vectorstore.add_documents(chunks)
+        print(f"Stored {len(chunks)} chunks in Qdrant for user '{user_id}' (doc {doc_id})")
         return True
     except Exception as e:
-        print(f"Error storing documents in FAISS: {e}")
+        print(f"Error storing documents in Qdrant: {e}")
         return False
 
 
-def get_retriever():
+def get_retriever(user_id: str, description: str = None):
     """
-    Get a retriever tool connected to the FAISS vector store.
+    Get a retriever tool scoped to a single user's documents.
 
-    Returns the retriever tool that can search documents stored by retriever_chain().
-    If no documents have been uploaded yet, creates a retriever with a dummy document.
+    Args:
+        user_id: The user whose documents should be searchable.
+        description: Optional text describing the user's documents, used in the
+            tool instruction. Falls back to a generic phrase when absent.
 
     Returns:
-        A LangChain retriever tool configured for the vector store.
-
-    Raises:
-        Exception: If vector store initialization fails.
+        A LangChain retriever tool filtered to the given user's chunks.
     """
-    global _faiss_vectorstore
+    vectorstore = _get_vectorstore()
+    retriever = vectorstore.as_retriever(
+        search_kwargs={"filter": _user_filter(user_id)}
+    )
 
-    try:
-        # Commenting out Qdrant code for temporary FAISS usage
-        # vectorstore = QdrantVectorStore.from_documents(
-        #     documents=[],
-        #     embedding=embeddings,
-        #     url=settings.QDRANT_URL,
-        #     api_key=settings.QDRANT_API_KEY,
-        #     collection_name=settings.CODE_COLLECTION,
-        # )
-        # retriever = vectorstore.as_retriever()
+    desc = description or "the user's uploaded documents"
+    return create_retriever_tool(
+        retriever,
+        "retriever_customer_uploaded_documents",
+        f"Use this tool **only** to answer questions about: {desc}\n"
+        "Don't use this tool to answer anything else.",
+    )
 
-        # Use the global vectorstore if it exists (documents have been uploaded)
-        if _faiss_vectorstore is not None:
-            retriever = _faiss_vectorstore.as_retriever()
-            print("Using existing FAISS vectorstore with uploaded documents")
-        else:
-            # No documents uploaded yet, create dummy for initialization
-            print("No documents uploaded yet, creating dummy vectorstore")
-            from langchain_core.documents import Document as LangChainDocument
 
-            dummy_doc = LangChainDocument(
-                page_content="No documents have been uploaded yet. Please upload a document first.",
-                metadata={"source": "initialization"}
+def delete_document_vectors(user_id: str, doc_id: str) -> None:
+    """
+    Delete all stored vectors for a given document owned by a user.
+
+    Args:
+        user_id: The owner of the document.
+        doc_id: The document identifier whose chunks should be removed.
+    """
+    client = _get_client()
+    _ensure_collection()
+    client.delete(
+        collection_name=COLLECTION,
+        points_selector=qmodels.FilterSelector(
+            filter=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="metadata.user_id",
+                        match=qmodels.MatchValue(value=user_id),
+                    ),
+                    qmodels.FieldCondition(
+                        key="metadata.doc_id",
+                        match=qmodels.MatchValue(value=doc_id),
+                    ),
+                ]
             )
-
-            _faiss_vectorstore = FAISS.from_documents(
-                documents=[dummy_doc],
-                embedding=embeddings
-            )
-            retriever = _faiss_vectorstore.as_retriever()
-
-        # Load document description
-        if os.path.exists("description.txt"):
-            with open("description.txt", "r", encoding="utf-8") as f:
-                description = f.read()
-        else:
-            description = None
-
-        retriever_tool = create_retriever_tool(
-            retriever,
-            "retriever_customer_uploaded_documents",
-            f"Use this tool **only** to answer questions about: {description}\n"
-            "Don't use this tool to answer anything else."
-        )
-
-        return retriever_tool
-
-    except Exception as e:
-        print(f"Error initializing retriever: {e}")
-        raise Exception(e)
+        ),
+    )

@@ -43,8 +43,11 @@ def doc_tool(state: State) -> Literal["rewrite", "generate"]:
         The next node: "generate" if score is "yes", otherwise "rewrite".
     """
     score = state["binary_score"]
-    print(f"[doc_tool] Routing based on score: {score}")
-    if score == "yes":
+    rewrite_count = state.get("rewrite_count", 0)
+    print(f"[doc_tool] Routing based on score: {score} (rewrites: {rewrite_count})")
+    # Generate when the context is relevant, or once we've exhausted the rewrite
+    # budget — otherwise the rewrite -> retriever loop never terminates.
+    if score == "yes" or rewrite_count >= 2:
         return "generate"
     else:
         return "rewrite"

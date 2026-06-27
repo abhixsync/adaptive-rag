@@ -52,10 +52,15 @@ prompts:
     You just have to rewrite the query so that we could get more accurate and suitable answer from our indexed information database.
 
   generate_prompt: |
-    You are a beautiful answer generator. You are given a context.
+    You are a precise answer generator.
+    question: {question}
     context: {context}
-    You need to generate the final answer based on the given context,
-    which would be easily readable and understandable by the user.
+    Answer the question directly using ONLY the information in the context.
+    - Be concise. Match the length to the question: for a simple factual
+      question, reply in a single short sentence or phrase.
+    - Do not add background, speculation, definitions, or generic commentary
+      that is not present in the context.
+    - If the context does not contain the answer, say so briefly.
 
   verify_prompt: |
     You are a strict fact checker.

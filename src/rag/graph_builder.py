@@ -8,7 +8,7 @@ from langchain_core.prompts import PromptTemplate
 from langgraph.constants import START, END
 from langgraph.graph.state import StateGraph
 
-from src.rag.reAct_agent import agent_executor
+from src.rag.reAct_agent import build_agent_executor
 from src.rag.retriever_setup import get_retriever
 from src.config.settings import Config
 from src.llms.openai import llm
@@ -32,7 +32,7 @@ def query_classifier(state: State):
         dict: Updated state with route and latest_query.
     """
     question = state["messages"][-1].content
-    retriever = get_retriever()
+    retriever = get_retriever(state.get("user_id"), state.get("retriever_description"))
     context = retriever.invoke(question)
     print("docs received from Qdrant")
     print(context)
@@ -77,6 +77,10 @@ def retriever_node(state: State):
         dict: Updated messages with tool calls.
     """
     messages = state["latest_query"]
+    # Build the agent per request, scoped to this user's documents in Qdrant.
+    agent_executor = build_agent_executor(
+        state.get("user_id"), state.get("retriever_description")
+    )
     result = agent_executor.invoke({"input": messages})
 
     # Extract tool calls
@@ -144,8 +148,11 @@ def rewrite_query(state: State):
     result = chain.invoke({"query": query})
     print(result)
 
+    count = state.get("rewrite_count", 0) + 1
+
     return {
-        "latest_query": result.content
+        "latest_query": result.content,
+        "rewrite_count": count
     }
 
 
@@ -160,14 +167,15 @@ def generate(state: State):
         dict: Generated response.
     """
     context = state["messages"][-1].content
+    question = state["latest_query"]
 
     generate_prompt = PromptTemplate(
         template=config.prompt("generate_prompt"),
-        input_variables=["context"]
+        input_variables=["question", "context"]
     )
 
     generate_chain = generate_prompt | llm
-    result = generate_chain.invoke({"context": context})
+    result = generate_chain.invoke({"question": question, "context": context})
 
     return {"messages": [{"role": "assistant", "content": result.content}]}
 

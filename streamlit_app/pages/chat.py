@@ -1,10 +1,15 @@
 """
-Chat page for the Streamlit application.
+Chat page for the Streamlit application (requires login).
 """
 
 import streamlit as st
 
-from streamlit_app.utils.api_client import query_backend, document_upload_rag
+from utils.api_client import (
+    delete_document,
+    document_upload_rag,
+    list_documents,
+    query_backend,
+)
 
 # Configure page settings
 st.set_page_config(
@@ -18,41 +23,28 @@ st.set_page_config(
     }
 )
 
-# Initialize logout confirmation state
-if "show_logout_confirm" not in st.session_state:
-    st.session_state.show_logout_confirm = False
+# Require authentication.
+token = st.session_state.get("token")
+if not token:
+    st.warning("Please log in first.")
+    st.stop()
 
-# Header with logout button
-col1, col2 = st.columns([10, 2])
+# Header: title + logged-in user + logout.
+col1, col2 = st.columns([8, 2])
+with col1:
+    st.title("💬 LangGraph Chat")
 with col2:
-    st.write("")  # Spacer
+    st.caption(f"Signed in as **{st.session_state.get('username', '')}**")
     if st.button("🔒 Logout", use_container_width=True):
-        st.session_state.show_logout_confirm = True
+        st.session_state.clear()
+        st.switch_page("home.py")
 
-# Logout confirmation dialog
-if st.session_state.show_logout_confirm:
-    st.warning("Are you sure you want to logout?")
-    col_confirm, col_cancel = st.columns(2)
-    with col_confirm:
-        if st.button("✅ Yes, logout"):
-            # Clear session state
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            # Redirect to home page
-            st.switch_page("Home.py")
-    with col_cancel:
-        if st.button("❌ Cancel"):
-            st.session_state.show_logout_confirm = False
-
-st.title("💬 LangGraph Chat")
-
-# Document upload section
+# Sidebar: upload + the user's document library.
 with st.sidebar:
     st.header("📂 Upload Documents")
 
     uploaded_file = st.file_uploader("Upload a PDF or TXT file", type=["pdf", "txt"])
 
-    file_description = None
     if uploaded_file:
         file_description = st.text_input(
             "📄 Describe your document (required)",
@@ -67,11 +59,12 @@ with st.sidebar:
 
         if file_description:
             if file_key not in st.session_state.uploaded_files:
-                # Upload file if not already uploaded
-                success = document_upload_rag(uploaded_file, file_description)
+                with st.spinner("Uploading & indexing..."):
+                    success = document_upload_rag(uploaded_file, file_description, token)
                 if success:
                     st.success(f"Uploaded: {uploaded_file.name}")
                     st.session_state.uploaded_files[file_key] = True
+                    st.rerun()
                 else:
                     st.error(f"Document Upload Failed: {uploaded_file.name}")
             else:
@@ -79,25 +72,46 @@ with st.sidebar:
         else:
             st.warning("Please describe your document before uploading.")
 
-# Check authentication
-if "session_id" not in st.session_state:
-    st.warning("Please login first.")
-    st.stop()
+    st.divider()
+
+    # My Documents: list + delete.
+    docs = list_documents(token)
+    st.header(f"📚 My Documents ({len(docs)})")
+    if not docs:
+        st.caption("No documents yet. Upload one above.")
+    for doc in docs:
+        d_col1, d_col2 = st.columns([5, 1])
+        with d_col1:
+            st.write(f"📄 {doc['filename']}")
+        with d_col2:
+            if st.button("🗑️", key=f"del_{doc['doc_id']}", help="Delete"):
+                if delete_document(doc["doc_id"], token):
+                    st.toast(f"Deleted {doc['filename']}")
+                    st.rerun()
+                else:
+                    st.error("Delete failed.")
 
 # Initialize chat history
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+# Display existing chat history
+for role, text in st.session_state.chat_history:
+    st.chat_message(role).write(text)
 
 # User input
 user_input = st.chat_input("Ask a question...")
 
 # Process user input and get response
 if user_input:
+    # Show the user's question immediately, before the backend call.
     st.session_state.chat_history.append(("user", user_input))
-    response = query_backend(user_input, st.session_state["jwt_token"])
-    st.session_state.chat_history.append(("assistant", response))
-    st.rerun()  # Rerun script to display updated messages
+    st.chat_message("user").write(user_input)
 
-# Display chat history
-for role, text in st.session_state.chat_history:
-    st.chat_message(role).write(text)
+    # Stream the answer area with a spinner while the backend works.
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            response = query_backend(user_input, token)
+        st.write(response)
+
+    st.session_state.chat_history.append(("assistant", response))

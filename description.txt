@@ -1,1 +1,1 @@
-This tool is designed solely for answering questions related to the content of your uploaded resume. Please use it to inquire specifically about the details and information contained within your document.
+This tool is designed exclusively to answer questions related to the contents of the uploaded document titled "doc." Please use it to retrieve information or clarify details contained within this specific document only.

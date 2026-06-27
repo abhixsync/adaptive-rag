@@ -1,158 +1,166 @@
 """
-API client for communicating with backend services.
+API client for communicating with the RAG backend (auth-gated).
 """
 
 import logging
-import os
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-# Backend service URLs
-RUST_BASE_URL = "http://localhost:8080/api"
+# Backend service URL (FastAPI: auth + RAG, requires a Bearer token).
 PYTHON_BASE_URL = "http://127.0.0.1:8000"
 
 
-def create_user(username: str, password: str, api_token: str) -> bool:
+def _auth_headers(token: str) -> dict:
+    """Build the Authorization header for a Bearer token."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def signup(username: str, password: str) -> dict:
     """
-    Create a new user account.
+    Register a new account.
 
     Args:
-        username: Username for the new account.
-        password: Password for the new account.
-        api_token: API token for authentication.
+        username: Desired username.
+        password: Desired password.
 
     Returns:
-        True if user creation succeeds, False otherwise.
+        On success, a dict with ``access_token`` and ``username``. On failure, a
+        dict with an ``error`` message.
     """
-    headers = {
-        "X-API-TOKEN": api_token,
-        "Content-Type": "application/json"
-    }
-    logger.info("API Token received: %s", api_token)
-
     try:
         response = requests.post(
-            f"{RUST_BASE_URL}/create_user",
+            f"{PYTHON_BASE_URL}/auth/signup",
             json={"username": username, "password": password},
-            headers=headers,
         )
-
-        logger.info("Calling /create_user, status code: %s", response.status_code)
-
         if response.status_code == 200:
-            try:
-                logger.debug("Create user response: %s", response.json())
-            except ValueError:
-                logger.warning("Create user returned non-JSON response")
-            return True
-        else:
-            logger.error(
-                "Create user failed: %s - %s",
-                response.status_code,
-                response.text
-            )
-            return False
-
+            return response.json()
+        return {"error": response.json().get("detail", "Signup failed")}
     except requests.RequestException as e:
-        logger.exception("Request to /create_user failed: %s", e)
-        return False
+        logger.exception("Signup request failed: %s", e)
+        return {"error": "Could not reach the server."}
 
 
-def login_user(username: str, password: str, api_token: str) -> dict:
+def login(username: str, password: str) -> dict:
     """
-    Authenticate user login.
+    Authenticate and obtain an access token.
 
     Args:
-        username: Username to log in.
-        password: Password for the user.
-        api_token: API token for authentication.
+        username: Account username.
+        password: Account password.
 
     Returns:
-        Response dictionary with JWT token if successful, None otherwise.
+        On success, a dict with ``access_token`` and ``username``. On failure, a
+        dict with an ``error`` message.
     """
-    headers = {
-        "X-API-TOKEN": api_token,
-        "Content-Type": "application/json"
-    }
-    response = requests.post(
-        f"{RUST_BASE_URL}/login",
-        json={"username": username, "password": password},
-        headers=headers,
-    )
-    logger.info("Calling /login, status code: %s", response.json())
-
-    if response.status_code == 200:
-        return response.json()
-
-    return None
+    try:
+        response = requests.post(
+            f"{PYTHON_BASE_URL}/auth/login",
+            json={"username": username, "password": password},
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {"error": response.json().get("detail", "Login failed")}
+    except requests.RequestException as e:
+        logger.exception("Login request failed: %s", e)
+        return {"error": "Could not reach the server."}
 
 
-def get_api_token() -> str:
-    """
-    Get an API token for authentication.
-
-    Returns:
-        API token string if successful, None otherwise.
-    """
-    response = requests.post(f"{RUST_BASE_URL}/init")
-    logger.info("Calling /init, status code: %s", response.json())
-
-    if response.status_code == 200:
-        return response.json()["api_token"]
-
-    return None
-
-
-def query_backend(query: str, session_id: str) -> str:
+def query_backend(query: str, token: str) -> str:
     """
     Send a query to the RAG backend.
 
     Args:
         query: The user's query text.
-        session_id: Session identifier for tracking conversation.
+        token: The user's access token.
 
     Returns:
-        Response text from the backend or error message.
+        Response text from the backend or an error message.
     """
     url = f"{PYTHON_BASE_URL}/rag/query"
-    print(f"[query_backend] Calling: {url}")
-
-    response = requests.post(
-        url,
-        json={"query": query, "session_id": session_id},
-        allow_redirects=False
-    )
-
-    if response.status_code == 200:
-        return response.json()["result"]["content"]
-    else:
+    try:
+        response = requests.post(
+            url,
+            json={"query": query},
+            headers=_auth_headers(token),
+            allow_redirects=False,
+        )
+        if response.status_code == 200:
+            return response.json()["result"]["content"]
         return f"Error: {response.status_code} - {response.text}"
+    except requests.RequestException as e:
+        logger.exception("Query request failed: %s", e)
+        return "Error: could not reach the server."
 
 
-def document_upload_rag(file, description: str) -> bool:
+def document_upload_rag(file, description: str, token: str) -> bool:
     """
     Upload a document to the RAG system.
 
     Args:
         file: File object to upload.
         description: Description of the document.
+        token: The user's access token.
 
     Returns:
         True if upload succeeds, False otherwise.
     """
-    headers = {
-        "X-Description": description
-    }
     url = f"{PYTHON_BASE_URL}/rag/documents/upload"
+    headers = {**_auth_headers(token), "X-Description": description}
 
-    if file:
+    if not file:
+        return False
+
+    try:
         files = {"file": (file.name, file, file.type)}
         response = requests.post(url, files=files, headers=headers)
-        print(response)
+        return response.status_code == 200 and response.json().get("status") is True
+    except requests.RequestException as e:
+        logger.exception("Upload request failed: %s", e)
+        return False
 
+
+def list_documents(token: str) -> list:
+    """
+    List the current user's uploaded documents.
+
+    Args:
+        token: The user's access token.
+
+    Returns:
+        A list of document records (possibly empty).
+    """
+    try:
+        response = requests.get(
+            f"{PYTHON_BASE_URL}/rag/documents",
+            headers=_auth_headers(token),
+        )
         if response.status_code == 200:
-            return True
+            return response.json().get("documents", [])
+        return []
+    except requests.RequestException as e:
+        logger.exception("List documents request failed: %s", e)
+        return []
 
-    return False
+
+def delete_document(doc_id: str, token: str) -> bool:
+    """
+    Delete one of the current user's documents.
+
+    Args:
+        doc_id: The id of the document to delete.
+        token: The user's access token.
+
+    Returns:
+        True if the document was deleted, False otherwise.
+    """
+    try:
+        response = requests.delete(
+            f"{PYTHON_BASE_URL}/rag/documents/{doc_id}",
+            headers=_auth_headers(token),
+        )
+        return response.status_code == 200
+    except requests.RequestException as e:
+        logger.exception("Delete document request failed: %s", e)
+        return False
