@@ -257,7 +257,7 @@ Form Data:
 
 ```bash
 # Clone the repository
-git clone https://github.com/abhixsync/Adaptive-Rag.git
+git clone https://github.com/abhixsync/adaptive-rag.git
 cd AdaptiveRag
 
 # Create virtual environment
@@ -535,7 +535,7 @@ A: Yes, remove Tavily dependency. Queries will use index or general LLM only.
 ## 💬 Support & Contact
 
 For issues, questions, or suggestions:
-- Open an [Issue](https://github.com/abhixsync/Adaptive-Rag/issues)
+- Open an [Issue](https://github.com/abhixsync/adaptive-rag/issues)
 - Check existing documentation
 - Review the code comments
 
@@ -562,7 +562,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **abhixsync**
 - GitHub: [@abhixsync](https://github.com/abhixsync)
-- Project: [Adaptive RAG](https://github.com/abhixsync/Adaptive-Rag)
+- Project: [Adaptive RAG](https://github.com/abhixsync/adaptive-rag)
 
 ---
 
